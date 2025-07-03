@@ -3,6 +3,7 @@ import requests
 from celery import shared_task
 from accounts.models import GHLAuthCredentials
 from decouple import config
+from accounts.services import fetch_all_contacts, sync_opportunities
 
 @shared_task
 def make_api_call():
@@ -37,4 +38,9 @@ def make_api_call():
             }
         )
     
+
+@shared_task
+def contact_and_opportunity_sync_task():
+    fetch_all_contacts()
+    sync_opportunities()
 

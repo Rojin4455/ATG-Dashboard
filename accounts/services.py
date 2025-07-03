@@ -31,7 +31,9 @@ class GHLOpportunityFetcher:
         self.pipelines = {
             "General Entity Pipeline": "XuGY5OWwnnVApR7udk2m",
             "Tax Onboarding Pipeline": "femeFj3B35BZTsOb04CZ", 
-            "Refund Pipeline": "PUlGYnwwi8Z10yD8Nu1s"
+            "Refund Pipeline": "PUlGYnwwi8Z10yD8Nu1s",
+            "Jannifer's Pipeline":"oEQOWmBshN67mQTo8nJC",
+            "Caitlyn's Pipeline":"10t8NVSGtAujbtkW643w",
         }
         
         # Cache for pipeline and user data
@@ -149,60 +151,83 @@ class GHLOpportunityFetcher:
         logger.info(f"Total opportunities fetched for {pipeline_name}: {len(all_opportunities)}")
         return all_opportunities
 
-    def save_opportunity_to_db(self, opp_data, pipeline_name):
-        """Save opportunity data to database"""
+    def bulk_save_opportunities(self, opportunities, pipeline_name):
+        """Bulk save or update opportunities"""
+        to_create = []
+        to_update = []
+        existing_ids = set(Opportunity.objects.filter(id__in=[opp["id"] for opp in opportunities]).values_list("id", flat=True))
+        
+        for opp_data in opportunities:
+            try:
+                pipeline_id = opp_data.get('pipelineId', '')
+                stage_id = opp_data.get('pipelineStageId', '')
+                pipeline_info = self.pipeline_cache.get(pipeline_id, {})
+                stage_name = pipeline_info.get('stages', {}).get(stage_id, '')
+                
+                assigned_to = opp_data.get('assignedTo', '')
+                user_info = self.fetch_user_data(assigned_to) if assigned_to else {}
+
+                contact = opp_data.get('contact', {})
+                created_at = self.parse_datetime(opp_data.get('createdAt'))
+                updated_at = self.parse_datetime(opp_data.get('updatedAt'))
+
+                opportunity = Opportunity(
+                    id=opp_data.get('id'),
+                    name=opp_data.get('name', ''),
+                    monetary_value=opp_data.get('monetaryValue', 0),
+                    pipeline_id=pipeline_id,
+                    pipeline_name=pipeline_name,
+                    pipeline_stage_id=stage_id,
+                    pipeline_stage_name=stage_name,
+                    assigned_to=assigned_to,
+                    assigned_user_name=user_info.get('name', ''),
+                    assigned_user_email=user_info.get('email', ''),
+                    status=opp_data.get('status', ''),
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    contact_id=contact.get('id', ''),
+                    contact_name=contact.get('name', ''),
+                    contact_company_name=contact.get('companyName', ''),
+                    contact_email=contact.get('email', ''),
+                    contact_phone=contact.get('phone', ''),
+                    contact_tags=contact.get('tags', []),
+                    location_id=opp_data.get('locationId', '')
+                )
+
+                if opportunity.id in existing_ids:
+                    to_update.append(opportunity)
+                else:
+                    to_create.append(opportunity)
+
+            except Exception as e:
+                logger.error(f"Error preparing opportunity {opp_data.get('id', 'Unknown')}: {e}")
+                continue
+
         try:
-            # Get pipeline and stage names
-            pipeline_id = opp_data.get('pipelineId', '')
-            stage_id = opp_data.get('pipelineStageId', '')
-            
-            pipeline_info = self.pipeline_cache.get(pipeline_id, {})
-            stage_name = pipeline_info.get('stages', {}).get(stage_id, '')
-            
-            # Get assigned user info
-            assigned_to = opp_data.get('assignedTo', '')
-            user_info = self.fetch_user_data(assigned_to) if assigned_to else {}
-            
-            # Get contact info
-            contact = opp_data.get('contact', {})
-            
-            # Parse dates
-            created_at = self.parse_datetime(opp_data.get('createdAt'))
-            updated_at = self.parse_datetime(opp_data.get('updatedAt'))
-            
-            # Create or update opportunity
-            opportunity, created = Opportunity.objects.update_or_create(
-                id=opp_data.get('id'),
-                defaults={
-                    'name': opp_data.get('name', ''),
-                    'monetary_value': opp_data.get('monetaryValue', 0),
-                    'pipeline_id': pipeline_id,
-                    'pipeline_name': pipeline_name,
-                    'pipeline_stage_id': stage_id,
-                    'pipeline_stage_name': stage_name,
-                    'assigned_to': assigned_to,
-                    'assigned_user_name': user_info.get('name', ''),
-                    'assigned_user_email': user_info.get('email', ''),
-                    'status': opp_data.get('status', ''),
-                    'created_at': created_at,
-                    'updated_at': updated_at,
-                    'contact_id': contact.get('id', ''),
-                    'contact_name': contact.get('name', ''),
-                    'contact_company_name': contact.get('companyName', ''),
-                    'contact_email': contact.get('email', ''),
-                    'contact_phone': contact.get('phone', ''),
-                    'contact_tags': contact.get('tags', []),
-                    'location_id': opp_data.get('locationId', '')
-                }
-            )
-            
-            action = "Created" if created else "Updated"
-            logger.info(f"{action} opportunity: {opportunity.name} (ID: {opportunity.id})")
-            return opportunity
-            
+            with transaction.atomic():
+                if to_create:
+                    Opportunity.objects.bulk_create(to_create, ignore_conflicts=True)
+                    logger.info(f"Bulk created {len(to_create)} opportunities")
+
+                if to_update:
+                    Opportunity.objects.bulk_update(
+                        to_update,
+                        fields=[
+                            'name', 'monetary_value', 'pipeline_id', 'pipeline_name',
+                            'pipeline_stage_id', 'pipeline_stage_name',
+                            'assigned_to', 'assigned_user_name', 'assigned_user_email',
+                            'status', 'created_at', 'updated_at', 'contact_id',
+                            'contact_name', 'contact_company_name', 'contact_email',
+                            'contact_phone', 'contact_tags', 'location_id'
+                        ]
+                    )
+                    logger.info(f"Bulk updated {len(to_update)} opportunities")
+
+            return len(to_create) + len(to_update)
+
         except Exception as e:
-            logger.error(f"Error saving opportunity {opp_data.get('id', 'Unknown')}: {e}")
-            return None
+            logger.error(f"Bulk save failed: {e}")
+            return 0
 
     def parse_datetime(self, date_string):
         """Parse datetime string to Django datetime object in US/Arizona timezone"""
@@ -247,10 +272,13 @@ class GHLOpportunityFetcher:
                 opportunities = self.fetch_opportunities_for_pipeline(pipeline_name, pipeline_id)
                 
                 # Save each opportunity to database
-                saved_count = 0
-                for opp_data in opportunities:
-                    if self.save_opportunity_to_db(opp_data, pipeline_name):
-                        saved_count += 1
+                # saved_count = 0
+                # for opp_data in opportunities:
+                #     if self.save_opportunity_to_db(opp_data, pipeline_name):
+                #         saved_count += 1
+
+                saved_count = self.bulk_save_opportunities(opportunities, pipeline_name)
+
                 
                 logger.info(f"Saved {saved_count}/{len(opportunities)} opportunities for {pipeline_name}")
                 total_saved += saved_count
@@ -338,14 +366,14 @@ def sync_opportunities():
     LOCATION_ID = token.location_id
 
     fetch_opportunities_standalone(ACCESS_TOKEN, LOCATION_ID)
-    fetch_all_contacts(ACCESS_TOKEN, LOCATION_ID)
+    # fetch_all_contacts(LOCATION_ID,ACCESS_TOKEN)
 
 
 
 
 
 
-def fetch_all_contacts(location_id: str, access_token: str = None) -> List[Dict[str, Any]]:
+def fetch_all_contacts() -> List[Dict[str, Any]]:
     """
     Fetch all contacts from GoHighLevel API with proper pagination handling.
     
@@ -358,7 +386,9 @@ def fetch_all_contacts(location_id: str, access_token: str = None) -> List[Dict[
     """
 
     
-    
+    token = GHLAuthCredentials.objects.first()
+    location_id = token.location_id
+    access_token = token.access_token
     
     
     base_url = "https://services.leadconnectorhq.com/contacts/"
@@ -489,23 +519,64 @@ def fetch_all_contacts(location_id: str, access_token: str = None) -> List[Dict[
 
 
 
+
 def sync_contacts_to_db(contact_data):
     """
-    Syncs contact data from API into the local Contact model using bulk upsert.
-    
+    Syncs contact data from API into the local Contact model using bulk upsert and deletion.
+
     Args:
         contact_data (list): List of contact dicts from GoHighLevel API
     """
     contacts_to_create = []
-    existing_ids = set(Contact.objects.filter(contact_id__in=[c['id'] for c in contact_data]).values_list('contact_id', flat=True))
+    contacts_to_update = [] # Use this list to collect objects for bulk_update
+
+    # Get all contact_ids from the incoming API data
+    incoming_contact_ids = {c['id'] for c in contact_data if 'id' in c} # Use a set for efficient lookups
+
+    # Get all existing contact_ids in your database that correspond to the incoming data's location(s)
+    # IMPORTANT: You need a way to filter your existing_ids to only those relevant to the current sync operation.
+    # If contact_data is always for a single location, you can filter by that location_id.
+    # If contact_data can contain multiple locations, you'll need a more sophisticated approach.
+    # For this example, let's assume all incoming_contact_ids belong to the scope of this sync.
+    # A better approach might be to pass a 'location_id' to this function.
+
+    # Let's assume you pass the location_id(s) for which you are syncing contacts.
+    # For simplicity, if the contact_data has a consistent 'locationId' for all items:
+    current_location_id = None
+    if contact_data:
+        # Get location_id from the first contact, assuming consistency for the entire batch
+        current_location_id = contact_data[0].get('locationId')
+
+    if not current_location_id:
+        print("Warning: No location_id found in contact_data. Cannot perform accurate deletion scope.")
+        # Decide whether to proceed without deletion, or raise an error.
+        # For now, let's proceed with a limited deletion scope or skip it if no location_id.
+
+
+    # Fetch existing contacts relevant to the current sync scope
+    # If you always sync contacts for a specific location, filter by that location_id
+    if current_location_id:
+        existing_db_contacts_query = Contact.objects.filter(location_id=current_location_id)
+    else:
+        # Fallback: if no location_id, this might delete contacts from all locations
+        # This is generally NOT recommended for a sync function unless you're syncing ALL contacts.
+        existing_db_contacts_query = Contact.objects.all()
+
+    existing_db_contacts_map = {contact.contact_id: contact for contact in existing_db_contacts_query}
+    existing_db_contact_ids = set(existing_db_contacts_map.keys())
+
 
     for item in contact_data:
-        
-        date_added = parse_datetime(item.get("dateAdded")) if item.get("dateAdded") else None
-        
+        contact_id = item.get("id")
+        if not contact_id: # Skip items without an ID
+            print(f"Skipping contact item with no ID: {item}")
+            continue
 
+        date_added = parse_datetime(item.get("dateAdded")) if item.get("dateAdded") else None
+
+        # Create a new Contact instance (even for updates, as it simplifies setting all fields)
         contact_obj = Contact(
-            contact_id=item.get("id"),
+            contact_id=contact_id,
             first_name=item.get("firstName"),
             last_name=item.get("lastName"),
             phone=item.get("phone"),
@@ -516,33 +587,75 @@ def sync_contacts_to_db(contact_data):
             tags=item.get("tags", []),
             custom_fields=item.get("customFields", []),
             location_id=item.get("locationId"),
-            timestamp=date_added
+            timestamp=date_added # Assuming timestamp maps to date_added for now
         )
 
-        if item.get("id") in existing_ids:
-            # Update existing contact
-            Contact.objects.filter(contact_id=item["id"]).update(
-                first_name=contact_obj.first_name,
-                last_name=contact_obj.last_name,
-                phone=contact_obj.phone,
-                email=contact_obj.email,
-                dnd=contact_obj.dnd,
-                country=contact_obj.country,
-                date_added=contact_obj.date_added,
-                tags=contact_obj.tags,
-                custom_fields=contact_obj.custom_fields,
-                location_id=contact_obj.location_id,
-                timestamp=contact_obj.timestamp
-            )
+        if contact_id in existing_db_contact_ids:
+            # Update existing contact. Append to update list.
+            # We fetch the existing object to update its fields directly,
+            # then add it to the bulk_update list.
+            # This is more efficient than .filter().update() if you also use bulk_create.
+            # For .bulk_update(), you need a list of actual model instances with their PKs.
+            existing_instance = existing_db_contacts_map[contact_id]
+            existing_instance.first_name = contact_obj.first_name
+            existing_instance.last_name = contact_obj.last_name
+            existing_instance.phone = contact_obj.phone
+            existing_instance.email = contact_obj.email
+            existing_instance.dnd = contact_obj.dnd
+            existing_instance.country = contact_obj.country
+            existing_instance.date_added = contact_obj.date_added
+            existing_instance.tags = contact_obj.tags
+            existing_instance.custom_fields = contact_obj.custom_fields
+            existing_instance.location_id = contact_obj.location_id
+            existing_instance.timestamp = contact_obj.timestamp # Update timestamp as well
+            contacts_to_update.append(existing_instance)
         else:
+            # New contact
             contacts_to_create.append(contact_obj)
 
-    if contacts_to_create:
-        with transaction.atomic():
+    # Identify contacts for deletion
+    # These are contacts in our DB (within the sync scope) but NOT in the incoming data
+    contacts_to_delete_ids = existing_db_contact_ids - incoming_contact_ids
+
+    # Perform operations within a single transaction
+    with transaction.atomic():
+        # 1. Create new contacts
+        if contacts_to_create:
             Contact.objects.bulk_create(contacts_to_create, ignore_conflicts=True)
+            print(f"Created {len(contacts_to_create)} new contacts.")
 
-    print(f"{len(contacts_to_create)} new contacts created.")
-    print(f"{len(existing_ids)} existing contacts updated.")
+        # 2. Update existing contacts
+        if contacts_to_update:
+            # List of fields to update for existing contacts
+            update_fields = [
+                "first_name", "last_name", "phone", "email", "dnd", "country",
+                "date_added", "tags", "custom_fields", "location_id", "timestamp"
+            ]
+            Contact.objects.bulk_update(contacts_to_update, update_fields)
+            print(f"Updated {len(contacts_to_update)} existing contacts.")
 
+        # 3. Delete contacts not present in the incoming data (within the current location scope)
+        if contacts_to_delete_ids:
+            # IMPORTANT: Add a safeguard if current_location_id is None, to prevent mass deletion
+            if current_location_id:
+                deleted_count, _ = Contact.objects.filter(
+                    contact_id__in=contacts_to_delete_ids,
+                    location_id=current_location_id
+                ).delete()
+                print(f"Deleted {deleted_count} contacts not present in the incoming data for location {current_location_id}.")
+            else:
+                print("Skipped deletion of contacts due to unknown location_id for the sync scope.")
+                # If you're syncing ALL contacts, you might remove the current_location_id check
+                # and directly delete based on contacts_to_delete_ids
+                # For a full global sync:
+                # deleted_count, _ = Contact.objects.filter(contact_id__in=contacts_to_delete_ids).delete()
+                # print(f"Deleted {deleted_count} contacts not present in incoming data.")
+
+    # You might want to remove these specific prints and just have a final summary
+    # Or keep them for detailed logging.
+    # print(f"{len(contacts_to_create)} new contacts created.")
+    # print(f"{len(existing_ids)} existing contacts updated.") # This old print is no longer accurate
+    # Let's adjust the final prints:
+    print("Sync complete.")
 
 

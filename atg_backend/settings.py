@@ -149,5 +149,9 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'accounts.tasks.make_api_call',
         'schedule': timedelta(hours=20),
     },
+    'sync_opportunity_and_call': {
+        'task': 'accounts.tasks.contact_and_opportunity_sync_task',
+        'schedule': timedelta(hours=18),
+    },
 }
 
