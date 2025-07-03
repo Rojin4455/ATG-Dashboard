@@ -32,8 +32,8 @@ class GHLOpportunityFetcher:
             "General Entity Pipeline": "XuGY5OWwnnVApR7udk2m",
             "Tax Onboarding Pipeline": "femeFj3B35BZTsOb04CZ", 
             "Refund Pipeline": "PUlGYnwwi8Z10yD8Nu1s",
-            "Jannifer's Pipeline":"oEQOWmBshN67mQTo8nJC",
-            "Caitlyn's Pipeline":"10t8NVSGtAujbtkW643w",
+            "Jannifer Pipeline":"oEQOWmBshN67mQTo8nJC",
+            "Caitlyn Pipeline":"10t8NVSGtAujbtkW643w",
         }
         
         # Cache for pipeline and user data
@@ -152,18 +152,58 @@ class GHLOpportunityFetcher:
         return all_opportunities
 
     def bulk_save_opportunities(self, opportunities, pipeline_name):
-        """Bulk save or update opportunities"""
+        """
+        Bulk save, update, or delete opportunities based on incoming API data.
+
+        Args:
+            opportunities (list): List of opportunity dicts from GoHighLevel API.
+            pipeline_name (str): The name of the pipeline these opportunities belong to.
+                                 Used to scope the sync (especially for deletions).
+        """
         to_create = []
         to_update = []
-        existing_ids = set(Opportunity.objects.filter(id__in=[opp["id"] for opp in opportunities]).values_list("id", flat=True))
-        
+        incoming_opportunity_ids = {opp["id"] for opp in opportunities if "id" in opp}
+
+        # --- Determine the scope for existing opportunities and deletion ---
+        # We need to fetch existing opportunities from the DB that match the scope
+        # of the incoming data. This is crucial for accurate deletion.
+        # Assuming opportunities always come with a 'locationId' and this function
+        # processes opportunities for a specific pipeline within a location.
+
+        # Get the location_id from the incoming data. Assuming consistency for the batch.
+        location_id_for_sync = None
+        if opportunities:
+            location_id_for_sync = opportunities[0].get('locationId')
+
+        if not location_id_for_sync:
+            logger.warning("No locationId found in incoming opportunities. Deletion scope will be broad or skipped.")
+            # Decide if you want to abort, or proceed without deletion, or use a broader scope.
+            # For safety, let's make deletion contingent on a known location_id.
+
+        # Fetch existing opportunities relevant to the current sync scope (location + pipeline)
+        existing_db_opportunities_query = Opportunity.objects.filter(
+            location_id=location_id_for_sync,
+            pipeline_name=pipeline_name # Assuming pipeline_name is a reliable filter for deletion scope
+        ) if location_id_for_sync else Opportunity.objects.none() # Don't fetch if no location_id for safety
+
+        existing_db_opportunities_map = {
+            opp.id: opp for opp in existing_db_opportunities_query
+        }
+        existing_db_opportunity_ids = set(existing_db_opportunities_map.keys())
+
+
         for opp_data in opportunities:
+            opp_id = opp_data.get('id')
+            if not opp_id:
+                logger.warning(f"Skipping opportunity item with no ID: {opp_data}")
+                continue
+
             try:
                 pipeline_id = opp_data.get('pipelineId', '')
                 stage_id = opp_data.get('pipelineStageId', '')
                 pipeline_info = self.pipeline_cache.get(pipeline_id, {})
                 stage_name = pipeline_info.get('stages', {}).get(stage_id, '')
-                
+
                 assigned_to = opp_data.get('assignedTo', '')
                 user_info = self.fetch_user_data(assigned_to) if assigned_to else {}
 
@@ -171,12 +211,14 @@ class GHLOpportunityFetcher:
                 created_at = self.parse_datetime(opp_data.get('createdAt'))
                 updated_at = self.parse_datetime(opp_data.get('updatedAt'))
 
+                # Create an Opportunity instance, whether for creation or update
+                # For update, we'll later copy these fields to the existing instance
                 opportunity = Opportunity(
-                    id=opp_data.get('id'),
+                    id=opp_id,
                     name=opp_data.get('name', ''),
                     monetary_value=opp_data.get('monetaryValue', 0),
                     pipeline_id=pipeline_id,
-                    pipeline_name=pipeline_name,
+                    pipeline_name=pipeline_name, # Use the passed pipeline_name for consistency
                     pipeline_stage_id=stage_id,
                     pipeline_stage_name=stage_name,
                     assigned_to=assigned_to,
@@ -194,40 +236,80 @@ class GHLOpportunityFetcher:
                     location_id=opp_data.get('locationId', '')
                 )
 
-                if opportunity.id in existing_ids:
-                    to_update.append(opportunity)
+                if opp_id in existing_db_opportunity_ids: # Check against fetched DB IDs
+                    # Update existing opportunity instance for bulk_update
+                    existing_instance = existing_db_opportunities_map[opp_id]
+                    existing_instance.name = opportunity.name
+                    existing_instance.monetary_value = opportunity.monetary_value
+                    existing_instance.pipeline_id = opportunity.pipeline_id
+                    existing_instance.pipeline_name = opportunity.pipeline_name
+                    existing_instance.pipeline_stage_id = opportunity.pipeline_stage_id
+                    existing_instance.pipeline_stage_name = opportunity.pipeline_stage_name
+                    existing_instance.assigned_to = opportunity.assigned_to
+                    existing_instance.assigned_user_name = opportunity.assigned_user_name
+                    existing_instance.assigned_user_email = opportunity.assigned_user_email
+                    existing_instance.status = opportunity.status
+                    existing_instance.created_at = opportunity.created_at # Assuming you might update this, otherwise remove
+                    existing_instance.updated_at = opportunity.updated_at
+                    existing_instance.contact_id = opportunity.contact_id
+                    existing_instance.contact_name = opportunity.contact_name
+                    existing_instance.contact_company_name = opportunity.contact_company_name
+                    existing_instance.contact_email = opportunity.contact_email
+                    existing_instance.contact_phone = opportunity.contact_phone
+                    existing_instance.contact_tags = opportunity.contact_tags
+                    existing_instance.location_id = opportunity.location_id
+                    to_update.append(existing_instance)
                 else:
+                    # New opportunity
                     to_create.append(opportunity)
 
             except Exception as e:
-                logger.error(f"Error preparing opportunity {opp_data.get('id', 'Unknown')}: {e}")
+                logger.error(f"Error preparing opportunity {opp_id}: {e}")
                 continue
 
+        # --- Deletion Logic ---
+        opportunities_to_delete_ids = existing_db_opportunity_ids - incoming_opportunity_ids
+
+        total_processed = 0
         try:
             with transaction.atomic():
                 if to_create:
                     Opportunity.objects.bulk_create(to_create, ignore_conflicts=True)
                     logger.info(f"Bulk created {len(to_create)} opportunities")
+                    total_processed += len(to_create)
 
                 if to_update:
-                    Opportunity.objects.bulk_update(
-                        to_update,
-                        fields=[
-                            'name', 'monetary_value', 'pipeline_id', 'pipeline_name',
-                            'pipeline_stage_id', 'pipeline_stage_name',
-                            'assigned_to', 'assigned_user_name', 'assigned_user_email',
-                            'status', 'created_at', 'updated_at', 'contact_id',
-                            'contact_name', 'contact_company_name', 'contact_email',
-                            'contact_phone', 'contact_tags', 'location_id'
-                        ]
-                    )
+                    # Ensure all fields are in the list for bulk_update
+                    update_fields = [
+                        'name', 'monetary_value', 'pipeline_id', 'pipeline_name',
+                        'pipeline_stage_id', 'pipeline_stage_name',
+                        'assigned_to', 'assigned_user_name', 'assigned_user_email',
+                        'status', 'created_at', 'updated_at', 'contact_id',
+                        'contact_name', 'contact_company_name', 'contact_email',
+                        'contact_phone', 'contact_tags', 'location_id'
+                    ]
+                    Opportunity.objects.bulk_update(to_update, fields=update_fields)
                     logger.info(f"Bulk updated {len(to_update)} opportunities")
+                    total_processed += len(to_update)
 
-            return len(to_create) + len(to_update)
+                if opportunities_to_delete_ids:
+                    if location_id_for_sync and pipeline_name: # Safety check before deleting
+                        deleted_count, _ = Opportunity.objects.filter(
+                            id__in=opportunities_to_delete_ids,
+                            location_id=location_id_for_sync,
+                            pipeline_name=pipeline_name # Filter by pipeline to scope deletion
+                        ).delete()
+                        logger.info(f"Deleted {deleted_count} opportunities not in incoming data for location '{location_id_for_sync}' and pipeline '{pipeline_name}'.")
+                        total_processed += deleted_count # Count deletions as part of processed
+                    else:
+                        logger.warning("Skipped opportunity deletion due to missing location_id or pipeline_name in sync context.")
+
+            return total_processed
 
         except Exception as e:
-            logger.error(f"Bulk save failed: {e}")
+            logger.error(f"Bulk save/update/delete failed for opportunities: {e}", exc_info=True)
             return 0
+
 
     def parse_datetime(self, date_string):
         """Parse datetime string to Django datetime object in US/Arizona timezone"""
