@@ -29,7 +29,7 @@ SECRET_KEY = config("SECRET_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['51.20.18.110', "localhost", "127.0.0.1"]
+ALLOWED_HOSTS = ["*"]
 
 
 # Application definition
@@ -151,7 +151,10 @@ CELERY_BEAT_SCHEDULE = {
     },
     'sync_opportunity_and_call': {
         'task': 'accounts.tasks.contact_and_opportunity_sync_task',
-        'schedule': timedelta(hours=18),
+        'schedule': timedelta(hours=12),
+    },
+    'refresh_smartvault_token': {
+        'task': 'accounts.tasks.refresh_smartvault_token',
+        'schedule': timedelta(hours=21),
     },
 }
-

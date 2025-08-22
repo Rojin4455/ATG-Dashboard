@@ -5,6 +5,7 @@ import uuid
 from django.contrib.postgres.fields import ArrayField, JSONField
 
 
+
 class GHLAuthCredentials(models.Model):
     user_id = models.CharField(max_length=255, unique=True)
     access_token = models.TextField()
@@ -81,3 +82,27 @@ class Opportunity(models.Model):
 
     def __str__(self):
         return self.name
+    
+
+
+
+
+class SmartVaultToken(models.Model):
+    user_id = models.CharField(max_length=255, unique=True)
+    access_token = models.TextField()
+    refresh_token = models.TextField()
+    token_type = models.CharField(max_length=50)
+    expires_at = models.DateTimeField()
+    refresh_expires_at = models.DateTimeField()
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def is_access_token_expired(self):
+        return timezone.now() >= self.expires_at
+
+    def is_refresh_token_expired(self):
+        return timezone.now() >= self.refresh_expires_at
+
+    def __str__(self):
+        return f"SmartVaultToken({self.user_id})"
